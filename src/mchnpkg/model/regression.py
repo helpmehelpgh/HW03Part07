@@ -164,7 +164,7 @@ class LinearRegression:
             },
         }
 
-    # (e) analysis plots on one figure
+# (e) analysis plots on one figure
     def analysis(self, title: Optional[str] = None, figsize: Tuple[int, int] = (12, 9)) -> plt.Figure:
         """
         Creates ONE figure with 4 subplots:
@@ -220,4 +220,373 @@ class LinearRegression:
         if title:
             fig.suptitle(title, y=1.02, fontsize=14)
         return fig
+
+class CauchyLoss(nn.Module):
+    def __init__(self, c: float = 1.0):
+        super().__init__()
+        self.c = float(c)
+    def forward(self, yhat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        z = (y - yhat) / self.c
+        # mean over samples (and over output dim)
+        return 0.5 * torch.log1p(z**2).mean()
+
+class CauchyRegression(nn.Module):
+    def __init__(self, n_features: int, c: float = 1.0):
+        super().__init__()
+        self.w = nn.Parameter(torch.zeros((n_features, 1), dtype=torch.float32))
+        self.b = nn.Parameter(torch.zeros((1,), dtype=torch.float32))
+        self.loss_fn = CauchyLoss(c=c)
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        return X @ self.w + self.b
+
+# -- tensors
+Xtr_t = torch.tensor(X_train_s, dtype=torch.float32)
+ytr_t = torch.tensor(y_train,   dtype=torch.float32)
+Xte_t = torch.tensor(X_test_s,  dtype=torch.float32)
+yte_t = torch.tensor(y_test,    dtype=torch.float32)
+
+# -- model / optimizer
+torch.manual_seed(0)
+model = CauchyRegression(n_features=X_train_s.shape[1], c=1.0)
+opt = torch.optim.Adam(model.parameters(), lr=0.05)
+
+# -- train
+loss_hist = []
+for epoch in range(5000):
+    opt.zero_grad()
+    yhat = model(Xtr_t)
+    loss = model.loss_fn(yhat, ytr_t)
+    loss.backward()
+    opt.step()
+    loss_hist.append(float(loss.detach().cpu().numpy()))
+    if epoch % 500 == 0:
+        print(f"epoch {epoch:4d}  loss={loss_hist[-1]:.6f}")
+
+# -- final loss (train)
+final_loss = loss_hist[-1]
+print("Final train Cauchy loss:", round(final_loss, 6))
+
+# -- coefficients back on standardized X scale
+b = model.b.detach().cpu().numpy().item()
+w = model.w.detach().cpu().numpy().ravel()
+print("Intercept (b):", b)
+print("Weights on standardized features [AT, V, AP, RH]:", w)
+
+# -- predictions, metrics
+with torch.no_grad():
+    yhat_tr = model(Xtr_t).cpu().numpy()
+    yhat_te = model(Xte_t).cpu().numpy()
+
+def metrics(y_true, y_pred):
+    r2  = r2_score(y_true, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = mean_squared_error(y_true, y_pred, squared=False)
+    return r2, mae, rmse
+
+print("Train (R2, MAE, RMSE):", [round(v,4) for v in metrics(y_train, yhat_tr)])
+print("Test  (R2, MAE, RMSE):", [round(v,4) for v in metrics(y_test,  yhat_te)])
+
+# -- (optional) Loss curve figure (one plot, no styles)
+plt.figure(figsize=(6,4))
+plt.plot(loss_hist)
+plt.xlabel("Epoch")
+plt.ylabel("Train Cauchy Loss (c=1)")
+plt.title("Training Loss")
+plt.show()
+
+
+
+
+
+
+
+
+
+
+"""
+Robust and ordinary linear regression utilities.
+
+Implements:
+- CauchyLoss (robust, c=1 by default)
+- CauchyRegression (PyTorch)
+- OLS closed-form for comparison
+- Helpers: metrics, scale conversions, bootstrap CIs, residual plots
+
+Dependencies: numpy, pandas (optional), torch, matplotlib, scikit-learn (for metrics only)
+"""
+
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Tuple, Optional, List, Dict
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+# Metrics kept lightweight (no seaborn). Only scikit metrics are used.
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import matplotlib.pyplot as plt
+
+
+# ------------------------------
+# Utilities
+# ------------------------------
+def add_intercept(X: np.ndarray) -> np.ndarray:
+    """Add a column of ones as the first column."""
+    return np.hstack([np.ones((X.shape[0], 1)), X])
+
+
+def ols_closed_form(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """
+    Closed-form OLS solution with intercept.
+
+    Args:
+        X: array (n, p) WITHOUT intercept column.
+        y: array (n, 1)
+    Returns:
+        beta: array (p+1, 1) -> [b, w1, ..., wp]
+    """
+    Xi = add_intercept(X)
+    beta = np.linalg.pinv(Xi.T @ Xi) @ (Xi.T @ y)
+    return beta
+
+
+def regression_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Return R2/MAE/RMSE."""
+    return {
+        "r2": float(r2_score(y_true, y_pred)),
+        "mae": float(mean_absolute_error(y_true, y_pred)),
+        "rmse": float(mean_squared_error(y_true, y_pred, squared=False)),
+    }
+
+
+def to_original_scale(
+    w_std: np.ndarray, b_std: float, mu: np.ndarray, sd: np.ndarray
+) -> Tuple[np.ndarray, float]:
+    """
+    Convert standardized-feature parameters (w_std, b_std) to original feature scale.
+
+    Model on std scale:  y = b_std + sum_j w_std_j * (x_j - mu_j)/sd_j
+    =>
+    y = b_orig + sum_j w_orig_j * x_j, where
+      w_orig_j = w_std_j / sd_j
+      b_orig   = b_std - sum_j (w_std_j * mu_j / sd_j)
+    """
+    w_orig = w_std / sd
+    b_orig = b_std - float((w_std * mu / sd).sum())
+    return w_orig, b_orig
+
+
+# ------------------------------
+# Robust loss (Cauchy)
+# ------------------------------
+class CauchyLoss(nn.Module):
+    """
+    Cauchy loss (robust). For residual r = y - yhat and scale c:
+        L = (c^2 / 2) * log(1 + (r/c)^2)
+    Here we drop c^2 factor (constant wrt params) and use:
+        0.5 * log(1 + (r/c)^2)
+    """
+
+    def __init__(self, c: float = 1.0):
+        super().__init__()
+        self.c = float(c)
+
+    def forward(self, yhat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        z = (y - yhat) / self.c
+        return 0.5 * torch.log1p(z**2).mean()
+
+
+# ------------------------------
+# Cauchy Regression (PyTorch)
+# ------------------------------
+@dataclass
+class CauchyRegressionConfig:
+    c: float = 1.0
+    lr: float = 0.05
+    max_epochs: int = 5000
+    tol: float = 1e-8
+    optimizer: str = "adam"  # "adam" or "sgd"
+    verbose: bool = False
+    random_state: Optional[int] = 0
+
+
+class CauchyRegression(nn.Module):
+    """
+    Linear model with Cauchy loss:
+        yhat = b + X @ w
+
+    Fits on standardized or raw features (your choice). If you pass standardized X,
+    use `to_original_scale` to convert coefficients for reporting.
+    """
+
+    def __init__(self, n_features: int, cfg: Optional[CauchyRegressionConfig] = None):
+        super().__init__()
+        self.n_features = int(n_features)
+        self.cfg = cfg or CauchyRegressionConfig()
+        if self.cfg.random_state is not None:
+            torch.manual_seed(self.cfg.random_state)
+
+        # Parameters
+        self.w = nn.Parameter(torch.zeros((self.n_features, 1), dtype=torch.float32))
+        self.b = nn.Parameter(torch.zeros((1,), dtype=torch.float32))
+
+        # Loss
+        self.loss_fn = CauchyLoss(c=self.cfg.c)
+
+        # Optimizer
+        if self.cfg.optimizer.lower() == "sgd":
+            self.opt = torch.optim.SGD(self.parameters(), lr=self.cfg.lr, momentum=0.9)
+        else:
+            self.opt = torch.optim.Adam(self.parameters(), lr=self.cfg.lr)
+
+        # Fitted flags/holders
+        self._fitted = False
+        self.history_: List[float] = []
+
+    def forward(self, X: torch.Tensor) -> torch.Tensor:
+        return X @ self.w + self.b
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "CauchyRegression":
+        """
+        Train with gradient descent.
+
+        Args:
+            X: array (n, p), features
+            y: array (n, 1) or (n,)
+        """
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.float32).reshape(-1, 1)
+
+        X_t = torch.tensor(X, dtype=torch.float32)
+        y_t = torch.tensor(y, dtype=torch.float32)
+
+        prev = float("inf")
+        self.history_.clear()
+
+        for epoch in range(self.cfg.max_epochs):
+            self.opt.zero_grad()
+            yhat = self.forward(X_t)
+            loss = self.loss_fn(yhat, y_t)
+            loss.backward()
+            self.opt.step()
+
+            val = float(loss.detach().cpu().numpy())
+            self.history_.append(val)
+
+            if self.cfg.verbose and (epoch % 500 == 0 or epoch == self.cfg.max_epochs - 1):
+                print(f"[CauchyRegression] epoch={epoch:5d} loss={val:.6f}")
+
+            if abs(prev - val) < self.cfg.tol:
+                break
+            prev = val
+
+        self._fitted = True
+        return self
+
+    # Properties for sklearn-like API
+    @property
+    def coef_(self) -> np.ndarray:
+        """Weights as (p,) ndarray (standardized-scale if you trained on standardized X)."""
+        return self.w.detach().cpu().numpy().ravel()
+
+    @property
+    def intercept_(self) -> float:
+        """Intercept (standardized-scale if you trained on standardized X)."""
+        return float(self.b.detach().cpu().numpy().ravel()[0])
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if not self._fitted:
+            raise RuntimeError("Model is not fitted. Call .fit() first.")
+        X_t = torch.tensor(np.asarray(X, dtype=np.float32), dtype=torch.float32)
+        with torch.no_grad():
+            yhat = self.forward(X_t).cpu().numpy()
+        return yhat
+
+    def score(self, X: np.ndarray, y: np.ndarray) -> Dict[str, float]:
+        yhat = self.predict(X)
+        return regression_metrics(y, yhat)
+
+
+# ------------------------------
+# Bootstrap Confidence Intervals
+# ------------------------------
+def bootstrap_cis_cauchy(
+    X: np.ndarray,
+    y: np.ndarray,
+    mu: Optional[np.ndarray],
+    sd: Optional[np.ndarray],
+    cfg: Optional[CauchyRegressionConfig] = None,
+    B: int = 500,
+    random_state: int = 123,
+) -> Dict[str, np.ndarray]:
+    """
+    Nonparametric bootstrap CIs for [Intercept, w1, ..., wp] on ORIGINAL scale.
+    Resamples rows with replacement, refits, converts coefs to original scale.
+
+    Args:
+        X, y: training data used to fit
+        mu, sd: feature means/scales used for standardization; if None, assume raw scale
+        cfg: training config; reasonable default if None
+        B: bootstrap reps
+    Returns:
+        dict with keys: 'est', 'low', 'high', 'names'
+    """
+    rng = np.random.default_rng(random_state)
+    n, p = X.shape
+    cfg = cfg or CauchyRegressionConfig()
+
+    # fit once to get point estimate (on std scale if X is std)
+    base = CauchyRegression(n_features=p, cfg=cfg)
+    base.fit(X, y)
+    w_std = base.coef_.copy()
+    b_std = base.intercept_
+
+    if (mu is not None) and (sd is not None):
+        w_est, b_est = to_original_scale(w_std, b_std, mu, sd)
+    else:
+        w_est, b_est = w_std, b_std
+
+    params = np.zeros((B, p + 1), dtype=float)
+    for b in range(B):
+        idx = rng.integers(0, n, size=n)
+        Xb, yb = X[idx], y[idx]
+        m = CauchyRegression(n_features=p, cfg=cfg)
+        m.fit(Xb, yb)
+        ws, bs = m.coef_, m.intercept_
+        if (mu is not None) and (sd is not None):
+            w_o, b_o = to_original_scale(ws, bs, mu, sd)
+        else:
+            w_o, b_o = ws, bs
+        params[b, 0] = b_o
+        params[b, 1:] = w_o
+
+    low = np.percentile(params, 2.5, axis=0)
+    high = np.percentile(params, 97.5, axis=0)
+    est = np.concatenate([[b_est], w_est])
+    names = ["Intercept"] + [f"w{j+1}" for j in range(p)]
+    return {"est": est, "low": low, "high": high, "names": names}
+
+
+# ------------------------------
+# Simple plotting helpers
+# ------------------------------
+def plot_loss_curve(loss_history: List[float]) -> None:
+    plt.figure(figsize=(6, 4))
+    plt.plot(loss_history)
+    plt.xlabel("Epoch")
+    plt.ylabel("Train Cauchy Loss")
+    plt.title("Training Loss")
+    plt.show()
+
+
+def residual_scatter(y_true: np.ndarray, y_pred: np.ndarray, x: np.ndarray, x_name: str) -> None:
+    res = (y_pred - y_true).ravel()
+    plt.figure(figsize=(6, 4))
+    plt.scatter(x, res, s=8)
+    plt.axhline(0.0)
+    plt.xlabel(x_name)
+    plt.ylabel("Residual (ŷ - y)")
+    plt.title(f"Residuals vs {x_name}")
+    plt.show()
 
