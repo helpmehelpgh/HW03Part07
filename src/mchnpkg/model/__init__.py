@@ -1,32 +1,20 @@
-from .regression import LinearRegression
-
-__all__ = ["LinearRegression"]
-
-
-
+# __init__.py
 from .regression import (
-    CauchyLoss,
+    LinearRegression,
     CauchyRegression,
-    CauchyRegressionConfig,
-    ols_closed_form,
-    regression_metrics,
-    to_original_scale,
-    bootstrap_cis_cauchy,
-    plot_loss_curve,
-    residual_scatter,
-    add_intercept,
+    fit_cauchy_sm,          # BONUS helper (statsmodels) – raises if statsmodels missing
+    train_test_split,
+    standardize,
+    mae, mse, rmse, r2_score,
+    residual_panel,
 )
 
 __all__ = [
-    "CauchyLoss",
+    "LinearRegression",
     "CauchyRegression",
-    "CauchyRegressionConfig",
-    "ols_closed_form",
-    "regression_metrics",
-    "to_original_scale",
-    "bootstrap_cis_cauchy",
-    "plot_loss_curve",
-    "residual_scatter",
-    "add_intercept",
+    "fit_cauchy_sm",
+    "train_test_split",
+    "standardize",
+    "mae", "mse", "rmse", "r2_score",
+    "residual_panel",
 ]
-
