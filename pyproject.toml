@@ -1,28 +1,3 @@
-[project]
-name = "mchnpkg"
-version = "0.3.8"
-description = "Add your description here"
-readme = "README.md"
-authors = [
-    { name = "helpmehelpgh", email = "helpmehelp44@gmail.com" }
-]
-requires-python = ">=3.12"
-dependencies = [
-    "matplotlib>=3.10.6",
-    "numpy>=2.3.3",
-    "scipy>=1.16.2",
-    "torch>=2.8.0",
-    "twine>=6.2.0",
-]
-
-[tool.maturin]
-module-name = "mchnpkg._core"
-python-packages = ["mchnpkg"]
-python-source = "src"
-
-[tool.uv]
-cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
-
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
-build-backend = "maturin"
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
