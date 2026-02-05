@@ -1,74 +1,89 @@
-import math
 import torch
 
 
-def _init_weight(fan_in: int, fan_out: int, device: torch.device) -> torch.Tensor:
+def binary_classification(d: int,
+                          n: int,
+                          epochs: int = 10000,
+                          eta: float = 0.001,
+                          seed: int = 0):
     """
-    He-style std: sqrt(2 / fan_in) as required by the homework.
+    Binary classification with manual gradient descent using PyTorch autograd.
+
+    Args:
+        d: number of features
+        n: number of samples
+        epochs: number of training epochs (default 10000)
+        eta: learning rate (default 0.001)
+        seed: random seed (optional)
+
+    Returns:
+        W1, W2, W3, W4: trained weight matrices (torch.Tensor)
+        losses: list of loss values per epoch (length = epochs)
     """
-    sigma = math.sqrt(2.0 / float(fan_in))
-    W = torch.randn(fan_in, fan_out, dtype=torch.float32, device=device) * sigma
-    W.requires_grad_(True)
-    return W
 
-
-def binary_classification(d: int, n: int, epochs: int = 10000, eta: float = 0.001):
-    """
-    Two-layer (actually 4 linear layers) binary classification with sigmoid activations.
-
-    Inputs:
-      d: number of features
-      n: number of samples
-      epochs: training epochs (default 10000)
-      eta: learning rate (default 0.001)
-
-    Output:
-      W1, W2, W3, W4: trained weight tensors
-      losses: torch.float32 tensor of length = epochs (cross-entropy loss history)
-    """
+    # Device (GPU if available)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Generate X ~ N(0,1), shape (n, d)
+    # Reproducibility
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
+    # -----------------------------
+    # Data: X and labels Y
+    # -----------------------------
     X = torch.randn(n, d, dtype=torch.float32, device=device)
 
-    # Generate labels: Y = 1 if sum(features) > 2 else 0, shape (n, 1)
-    Y = (X.sum(dim=1, keepdim=True) > 2.0).to(torch.float32)
+    # Label rule (edit this line if your homework specifies a different rule)
+    # Example: label = 1 if sum of all features > 2 else 0
+    Y = (X.sum(dim=1, keepdim=True) > 2).float()
 
-    # Weight shapes: (d,48), (48,16), (16,32), (32,1)
-    W1 = _init_weight(d, 48, device)
-    W2 = _init_weight(48, 16, device)
-    W3 = _init_weight(16, 32, device)
-    W4 = _init_weight(32, 1, device)
+    # -----------------------------
+    # Weight initialization: N(0, 1/sqrt(n_in))
+    # -----------------------------
+    def init_W(n_in, n_out):
+        std = 1.0 / (n_in ** 0.5)
+        W = torch.randn(n_in, n_out, device=device, dtype=torch.float32) * std
+        return torch.nn.Parameter(W)
 
-    eps = 1e-12
-    loss_hist = []
+    # Shapes from your earlier spec
+    W1 = init_W(d, 48)
+    W2 = init_W(48, 16)
+    W3 = init_W(16, 32)
+    W4 = init_W(32, 1)
 
-    for _ in range(int(epochs)):
-        # Forward pass (sigmoid after each linear map)
-        A1 = torch.sigmoid(X @ W1)      # (n, 48)
-        A2 = torch.sigmoid(A1 @ W2)     # (n, 16)
-        A3 = torch.sigmoid(A2 @ W3)     # (n, 32)
-        Yhat = torch.sigmoid(A3 @ W4)   # (n, 1)
+    params = [W1, W2, W3, W4]
 
-        # Binary cross-entropy (manual, so it's clear)
-        loss = -(Y * torch.log(Yhat + eps) + (1.0 - Y) * torch.log(1.0 - Yhat + eps)).mean()
-        loss_hist.append(loss.detach().item())
+    # -----------------------------
+    # Binary cross entropy loss
+    # -----------------------------
+    def bce(yhat, y, eps=1e-7):
+        yhat = torch.clamp(yhat, eps, 1 - eps)
+        return -(y * torch.log(yhat) + (1 - y) * torch.log(1 - yhat)).mean()
 
-        # Backprop
+    # -----------------------------
+    # Training loop
+    # -----------------------------
+    losses = []
+
+    for _ in range(epochs):
+        # Forward
+        a1 = torch.sigmoid(X @ W1)
+        a2 = torch.sigmoid(a1 @ W2)
+        a3 = torch.sigmoid(a2 @ W3)
+        yhat = torch.sigmoid(a3 @ W4)
+
+        loss = bce(yhat, Y)
+        losses.append(loss.item())
+
+        # Backward
         loss.backward()
 
-        # Gradient descent update
+        # GD update
         with torch.no_grad():
-            W1 -= eta * W1.grad
-            W2 -= eta * W2.grad
-            W3 -= eta * W3.grad
-            W4 -= eta * W4.grad
+            for p in params:
+                p -= eta * p.grad
+                p.grad.zero_()
 
-        # Zero gradients
-        W1.grad.zero_()
-        W2.grad.zero_()
-        W3.grad.zero_()
-        W4.grad.zero_()
-
-    losses = torch.tensor(loss_hist, dtype=torch.float32)
-    return W1, W2, W3, W4, losses
+    # Return trained weights as tensors + losses
+    return W1.detach(), W2.detach(), W3.detach(), W4.detach(), losses
