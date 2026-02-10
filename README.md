@@ -1,76 +1,58 @@
-# DLHW2 — CPE 487/587 Homework 2 (Training a Neural Network)
+## HW02Q8 — Multiclass Classification (Android Malware) + Boxplot
 
-This repository contains the Homework 2 implementation for CPE 487/587.
-It extends the UV-based package structure from Homework 01 and adds weight-matrix visualization
-animations for the learned weights.
+### What this does
+This part trains a simple neural network classifier on the Android malware dataset and:
+- saves training/testing metrics (accuracy, macro precision/recall/F1) into CSV files
+- aggregates multiple runs and generates a boxplot PDF comparing metrics across runs
 
----
+### 1) Download the dataset
+From the project root (~/DLHW2), run:
 
-## Project Structure
+chmod +x malwaredatadownload.sh
+./malwaredatadownload.sh
 
-```text
-DLHW2/
-├─ pyproject.toml
-├─ README.md
-├─ uv.lock
-├─ scripts/
-│  ├─ binaryclassification_impl.py
-│  ├─ binaryclassification_animate_impl.py
-├─ src/
-│  └─ mchnpkg/
-│     ├─ __init__.py
-│     ├─ deepl/
-│     │  ├─ __init__.py
-│     │  └─ two_layer_binary_classification.py
-│     └─ animation/
-│        ├─ __init__.py
-│        ├─ weight_animation.py
-│        └─ largewt_animation.py
-└─ .gitignore
+This downloads the dataset to:
+- data/Android_Malware.csv
+------------------------------------------------------------
 
-Install (UV)
+### 2) Run one training run (creates one metrics CSV)
+From the project root (~/DLHW2):
 
-From the project root:
+uv run python scripts/multiclass_impl.py --keyword hw02 --standardize --epoch 50 --eta 0.001
 
-uv sync
+This creates a file like:
+- results/metrics_hw02_<TIMESTAMP>.csv
 
-Why do we need clone() when saving weight history?
+------------------------------------------------------------
 
-When we store weights at each epoch, we must freeze a snapshot of the tensor at that moment.
-If we save without clone(), the saved tensor can still share underlying storage or be affected by later updates.
-That can cause earlier history entries to accidentally reflect newer weight values.
+### 3) Run 5 training runs + generate the boxplot (recommended)
+Use the bash script:
 
-Using:
+chmod +x multiclass_impl.sh
+./multiclass_impl.sh
 
-W.detach().cpu().clone()
+This will:
+1) run scripts/multiclass_impl.py five times (same parameters, same keyword)
+2) run scripts/multiclass_eval.py to aggregate all CSV files matching the keyword
+3) save the boxplot PDF to results/
 
-creates an independent copy in new memory, so each W*_hist[i] truly contains the weight values from epoch i.
-This is required to build a correct animation over time.
+------------------------------------------------------------
 
-How to execute HW02Q7 and generate .mp4 animations
+### 4) Generate the boxplot only (if you already have CSV files)
+uv run python scripts/multiclass_eval.py --keyword hw02
 
-This part generates 4 animations (one per weight matrix W1–W4) using the 3D weight histories
-returned by binary_classification().
+------------------------------------------------------------
 
-1) Run the animation script
+### Where outputs are saved
+- Metrics CSV files:
+  - results/metrics_hw02_<TIMESTAMP>.csv
+- Boxplot PDF:
+  - results/boxplot_hw02_<TIMESTAMP>.pdf
 
-From the project root:
+------------------------------------------------------------
 
-uv run python scripts/binaryclassification_animate_impl.py
-
-
-The script trains the model and then creates 4 videos using:
-
-animate_weight_heatmap(W1_hist, ...)
-
-animate_weight_heatmap(W2_hist, ...)
-
-animate_weight_heatmap(W3_hist, ...)
-
-animate_weight_heatmap(W4_hist, ...)
-
-2) Where the .mp4 files are saved
-
-Manim writes outputs under:
-
-./media/videos/
+### Notes
+- The dataset includes four classes:
+  - Android_Adware, Android_Scareware, Android_SMS_Malware, Benign
+- Some non-useful columns are removed during preprocessing (IDs, IPs, ports, protocol, timestamp).
+- --standardize standardizes features using training-set statistics only.
