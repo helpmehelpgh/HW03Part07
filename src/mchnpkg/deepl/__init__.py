@@ -1,6 +1,4 @@
-
-
 from .two_layer_binary_classification import binary_classification
-from .multiclass import SimpleNN, ClassTrainer
+from .multiclass import ConvLayer, ImageNetCNN, CNNTrainer
 
-__all__ = ["SimpleNN", "ClassTrainer","binary_classification"]
+__all__ = ["binary_classification", "ConvLayer", "ImageNetCNN", "CNNTrainer"]

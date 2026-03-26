@@ -1,130 +1,262 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple, Type, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 
-import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 
-from sklearn.metrics import confusion_matrix, precision_recall_fscore_support, accuracy_score
 
-
-class SimpleNN(nn.Module):
+class ConvLayer(nn.Module):
     """
-    in_features -> 3 -> 4 -> 5 -> num_classes (logits)
+    Reusable convolution block:
+    Conv2d -> BatchNorm2d -> ReLU -> MaxPool2d
     """
 
-    def __init__(self, in_features: int, num_classes: int):
+    def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
-        self.fc1 = nn.Linear(in_features, 3)
-        self.fc2 = nn.Linear(3, 4)
-        self.fc3 = nn.Linear(4, 5)
-        self.fc4 = nn.Linear(5, num_classes)
-        self.relu = nn.ReLU()
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+            ),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        x = self.relu(self.fc3(x))
-        return self.fc4(x)  # logits (N, num_classes)
+        return self.block(x)
+
+
+class ImageNetCNN(nn.Module):
+    """
+    CNN for ImageNet classification.
+
+    Architecture:
+    3 -> 64 -> 128 -> 256 -> 512 -> 512
+    then global average pooling
+    then FC 512->1024 -> ReLU -> Dropout -> FC -> num_classes
+    """
+
+    def __init__(self, num_classes: int, dropout: float = 0.5):
+        super().__init__()
+
+        self.block1 = ConvLayer(3, 64)
+        self.block2 = ConvLayer(64, 128)
+        self.block3 = ConvLayer(128, 256)
+        self.block4 = ConvLayer(256, 512)
+        self.block5 = ConvLayer(512, 512)
+
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.flatten = nn.Flatten()
+
+        self.fc1 = nn.Linear(512, 1024)
+        self.relu = nn.ReLU(inplace=True)
+        self.dropout = nn.Dropout(p=dropout)
+        self.fc2 = nn.Linear(1024, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.block1(x)
+        x = self.block2(x)
+        x = self.block3(x)
+        x = self.block4(x)
+        x = self.block5(x)
+
+        x = self.global_avg_pool(x)
+        x = self.flatten(x)
+
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+
+        return x  # logits
 
 
 @dataclass
-class ClassTrainer:
-    X_train: torch.Tensor
-    Y_train: torch.Tensor
-    eta: float = 1e-3
-    epoch: int = 100  # HW uses "epoch"
+class CNNTrainer:
+    model: nn.Module
+    train_loader: torch.utils.data.DataLoader
+    val_loader: torch.utils.data.DataLoader
+    epoch: int = 10
+    eta: float = 1e-2
     loss: Optional[nn.Module] = None
     optimizer: Optional[torch.optim.Optimizer] = None
-    model_cls: Type[nn.Module] = SimpleNN
-    num_classes: int = 4
+    scheduler: Optional[Any] = None
     device: Optional[torch.device] = None
+    print_every: int = 10
 
-    # stored history
-    loss_vector: Optional[torch.Tensor] = None
-    accuracy_vector: Optional[torch.Tensor] = None
-
-    # trained model
-    model: Optional[nn.Module] = None
+    train_loss_vector: List[float] = field(default_factory=list)
+    train_accuracy_vector: List[float] = field(default_factory=list)
+    val_loss_vector: List[float] = field(default_factory=list)
+    val_accuracy_vector: List[float] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.X_train = self.X_train.to(self.device).float()
-        self.Y_train = self.Y_train.to(self.device).long().view(-1)
+        self.model = self.model.to(self.device)
 
         if self.loss is None:
             self.loss = nn.CrossEntropyLoss()
 
-        self.model = self.model_cls(in_features=int(self.X_train.shape[1]), num_classes=self.num_classes).to(self.device)
-
         if self.optimizer is None:
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.eta)
+            self.optimizer = torch.optim.SGD(
+                self.model.parameters(),
+                lr=self.eta,
+                momentum=0.9,
+                weight_decay=1e-4,
+            )
 
-        self.loss_vector = torch.zeros(self.epoch, dtype=torch.float32, device="cpu")
-        self.accuracy_vector = torch.zeros(self.epoch, dtype=torch.float32, device="cpu")
-
-    def train(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        assert self.model is not None and self.optimizer is not None and self.loss is not None
+    def _run_one_train_epoch(self, ep: int) -> Tuple[float, float]:
+        assert self.optimizer is not None
+        assert self.loss is not None
 
         self.model.train()
-        for ep in range(self.epoch):
+
+        running_loss = 0.0
+        running_correct = 0
+        running_total = 0
+
+        for batch_idx, (images, labels) in enumerate(self.train_loader):
+            images = images.to(self.device, dtype=torch.float32)
+            labels = labels.to(self.device, dtype=torch.long)
+
             self.optimizer.zero_grad()
-            logits = self.model(self.X_train)
-            loss_val = self.loss(logits, self.Y_train)
+            logits = self.model(images)
+            loss_val = self.loss(logits, labels)
             loss_val.backward()
             self.optimizer.step()
 
             preds = torch.argmax(logits.detach(), dim=1)
-            acc = (preds == self.Y_train).float().mean().item()
+            correct = (preds == labels).sum().item()
+            total = labels.size(0)
 
-            self.loss_vector[ep] = loss_val.detach().cpu()
-            self.accuracy_vector[ep] = float(acc)
+            running_loss += loss_val.item() * total
+            running_correct += correct
+            running_total += total
 
-        return self.loss_vector, self.accuracy_vector
+            if (batch_idx + 1) % self.print_every == 0:
+                batch_acc = correct / total
+                print(
+                    f"Epoch [{ep + 1}/{self.epoch}] "
+                    f"Batch [{batch_idx + 1}/{len(self.train_loader)}] "
+                    f"Loss: {loss_val.item():.6f} "
+                    f"Acc: {batch_acc:.4f}"
+                )
 
-    def predict(self, X: torch.Tensor) -> torch.Tensor:
-        assert self.model is not None
+        epoch_loss = running_loss / running_total
+        epoch_acc = running_correct / running_total
+        return epoch_loss, epoch_acc
+
+    def _run_one_val_epoch(self) -> Tuple[float, float]:
+        assert self.loss is not None
+
+        self.model.eval()
+
+        running_loss = 0.0
+        running_correct = 0
+        running_total = 0
+
+        with torch.no_grad():
+            for images, labels in self.val_loader:
+                images = images.to(self.device, dtype=torch.float32)
+                labels = labels.to(self.device, dtype=torch.long)
+
+                logits = self.model(images)
+                loss_val = self.loss(logits, labels)
+
+                preds = torch.argmax(logits, dim=1)
+                correct = (preds == labels).sum().item()
+                total = labels.size(0)
+
+                running_loss += loss_val.item() * total
+                running_correct += correct
+                running_total += total
+
+        epoch_loss = running_loss / running_total
+        epoch_acc = running_correct / running_total
+        return epoch_loss, epoch_acc
+
+    def train(self) -> Dict[str, List[float]]:
+        for ep in range(self.epoch):
+            train_loss, train_acc = self._run_one_train_epoch(ep)
+            val_loss, val_acc = self._run_one_val_epoch()
+
+            self.train_loss_vector.append(train_loss)
+            self.train_accuracy_vector.append(train_acc)
+            self.val_loss_vector.append(val_loss)
+            self.val_accuracy_vector.append(val_acc)
+
+            if self.scheduler is not None:
+                self.scheduler.step()
+
+            print(
+                f"Epoch [{ep + 1}/{self.epoch}] completed | "
+                f"Train Loss: {train_loss:.6f}, Train Acc: {train_acc:.4f} | "
+                f"Val Loss: {val_loss:.6f}, Val Acc: {val_acc:.4f}"
+            )
+
+        return {
+            "train_loss": self.train_loss_vector,
+            "train_accuracy": self.train_accuracy_vector,
+            "val_loss": self.val_loss_vector,
+            "val_accuracy": self.val_accuracy_vector,
+        }
+
+    def predict(self, x: torch.Tensor) -> torch.Tensor:
         self.model.eval()
         with torch.no_grad():
-            logits = self.model(X.to(self.device).float())
+            x = x.to(self.device, dtype=torch.float32)
+            logits = self.model(x)
             preds = torch.argmax(logits, dim=1)
         return preds.detach().cpu()
 
-    def test(self, X_test: torch.Tensor, y_test: torch.Tensor) -> Dict[str, Any]:
-        y_true = y_test.view(-1).long().cpu().numpy()
-        y_pred = self.predict(X_test).cpu().numpy()
+    def evaluate_loader(self, loader: torch.utils.data.DataLoader) -> Dict[str, Any]:
+        self.model.eval()
 
-        acc = float(accuracy_score(y_true, y_pred))
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            y_true, y_pred, average="macro", zero_division=0
-        )
-        cm = confusion_matrix(y_true, y_pred)
+        all_preds = []
+        all_labels = []
+
+        with torch.no_grad():
+            for images, labels in loader:
+                images = images.to(self.device, dtype=torch.float32)
+                labels = labels.to(self.device, dtype=torch.long)
+
+                logits = self.model(images)
+                preds = torch.argmax(logits, dim=1)
+
+                all_preds.append(preds.cpu())
+                all_labels.append(labels.cpu())
+
+        y_pred = torch.cat(all_preds).numpy()
+        y_true = torch.cat(all_labels).numpy()
+        accuracy = float((y_pred == y_true).mean())
 
         return {
-            "accuracy": acc,
-            "precision_macro": float(precision),
-            "recall_macro": float(recall),
-            "f1_macro": float(f1),
-            "confusion_matrix": cm,
+            "accuracy": accuracy,
+            "y_true": y_true,
+            "y_pred": y_pred,
         }
 
-    def save(self, file_name: str = "model.onnx") -> Path:
-        """
-        Save ONNX model to file_name.
-        """
-        assert self.model is not None
+    def save(
+        self,
+        file_name: str = "model.onnx",
+        input_size: Tuple[int, int, int] = (3, 224, 224),
+    ) -> Path:
         self.model.eval()
 
         out_path = Path(file_name).expanduser().resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        dummy = torch.randn(1, int(self.X_train.shape[1]), device=self.device, dtype=torch.float32)
+        c, h, w = input_size
+        dummy = torch.randn(1, c, h, w, device=self.device, dtype=torch.float32)
 
         torch.onnx.export(
             self.model,
@@ -133,76 +265,37 @@ class ClassTrainer:
             export_params=True,
             opset_version=17,
             do_constant_folding=True,
-            input_names=["X"],
+            input_names=["images"],
             output_names=["logits"],
-            dynamic_axes={"X": {0: "batch"}, "logits": {0: "batch"}},
+            dynamic_axes={"images": {0: "batch"}, "logits": {0: "batch"}},
         )
         return out_path
 
-    def evaluation(
-        self,
-        X_test: Optional[torch.Tensor] = None,
-        y_test: Optional[torch.Tensor] = None,
-        save_prefix: str = "results/hw02",
-    ) -> Dict[str, Any]:
-        """
-        Plot loss/accuracy and confusion matrices. Saves PDFs under save_prefix_*.
-        """
-        Path("results").mkdir(exist_ok=True)
-
-        # loss plot
-        if self.loss_vector is not None:
-            plt.figure()
-            plt.plot(self.loss_vector.numpy())
-            plt.xlabel("Epoch")
-            plt.ylabel("Loss")
-            plt.title("Training Loss")
-            plt.savefig(f"{save_prefix}_loss.pdf", bbox_inches="tight")
-            plt.close()
-
-        # accuracy plot
-        if self.accuracy_vector is not None:
-            plt.figure()
-            plt.plot(self.accuracy_vector.numpy())
-            plt.xlabel("Epoch")
-            plt.ylabel("Accuracy")
-            plt.title("Training Accuracy")
-            plt.savefig(f"{save_prefix}_accuracy.pdf", bbox_inches="tight")
-            plt.close()
-
-        # train confusion matrix
-        train_pred = self.predict(self.X_train).numpy()
-        train_true = self.Y_train.detach().cpu().numpy()
-        cm_train = confusion_matrix(train_true, train_pred)
+    def plot_history(self, save_prefix: str = "results/imagenet") -> None:
+        out_dir = Path(save_prefix).expanduser().resolve().parent
+        out_dir.mkdir(parents=True, exist_ok=True)
 
         plt.figure()
-        plt.imshow(cm_train)
-        plt.title("Confusion Matrix (Train)")
-        plt.xlabel("Predicted")
-        plt.ylabel("True")
-        plt.colorbar()
-        for (i, j), v in np.ndenumerate(cm_train):
-            plt.text(j, i, str(v), ha="center", va="center")
-        plt.savefig(f"{save_prefix}_cm_train.pdf", bbox_inches="tight")
+        plt.plot(self.train_loss_vector, label="Train Loss")
+        plt.plot(self.val_loss_vector, label="Val Loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Training and Validation Loss")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{save_prefix}_loss.png", dpi=300, bbox_inches="tight")
         plt.close()
 
-        out = {"train_confusion_matrix": cm_train}
+        plt.figure()
+        plt.plot(self.train_accuracy_vector, label="Train Accuracy")
+        plt.plot(self.val_accuracy_vector, label="Val Accuracy")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+        plt.title("Training and Validation Accuracy")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{save_prefix}_accuracy.png", dpi=300, bbox_inches="tight")
+        plt.close()
 
-        if X_test is not None and y_test is not None:
-            test_metrics = self.test(X_test, y_test)
-            cm_test = test_metrics["confusion_matrix"]
-
-            plt.figure()
-            plt.imshow(cm_test)
-            plt.title("Confusion Matrix (Test)")
-            plt.xlabel("Predicted")
-            plt.ylabel("True")
-            plt.colorbar()
-            for (i, j), v in np.ndenumerate(cm_test):
-                plt.text(j, i, str(v), ha="center", va="center")
-            plt.savefig(f"{save_prefix}_cm_test.pdf", bbox_inches="tight")
-            plt.close()
-
-            out["test_metrics"] = test_metrics
-
-        return out
+    def count_trainable_parameters(self) -> int:
+        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
